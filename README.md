@@ -1,7 +1,7 @@
 # 1915 South Help Desk
 
-Employee help-desk tickets for 1915 South's stores and DC. Employees sign in once with their
-@1915south.com Microsoft account, pin the app to their iPad, and submit tickets. Each ticket has:
+Employee help-desk tickets for 1915 South's stores and DC. Employees sign in once with a 6-digit code
+sent to their @1915south.com email, pin the app to their iPad, and submit tickets. Each ticket has:
 
 - **Category:** Question, Problem or Request
 - **Priority:** Low (green), Medium (yellow) or High (red)

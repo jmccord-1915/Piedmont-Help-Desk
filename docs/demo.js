@@ -1,10 +1,14 @@
 // In-memory demo data so you can click around without Supabase.
-// Open the app with ?demo (admin view) or ?demo&as=employee.
+// Open the app with ?demo (admin view), ?demo&as=employee, or ?demo&as=new
+// (signed out — shows the email-code sign-in; any 6-digit code works).
 export function createDemoApi() {
-  const asEmployee = new URLSearchParams(location.search).get("as") === "employee";
+  const as = new URLSearchParams(location.search).get("as");
+  const asEmployee = as === "employee" || as === "new";
   const admin = { id: "u-admin", email: "jmccord@1915south.com", full_name: "J. McCord", home_location: "DC", is_admin: true };
   const emp = { id: "u-emp", email: "sam.taylor@1915south.com", full_name: "Sam Taylor", home_location: "1201 Greensboro", is_admin: false };
   const me = asEmployee ? emp : admin;
+  let authCb = null;
+  if (as === "new") Object.assign(me, { home_location: null });
   const ago = (h) => new Date(Date.now() - h * 3600e3).toISOString();
 
   let nextId = 1009, nextComment = 10;
@@ -49,11 +53,16 @@ export function createDemoApi() {
   const wait = (v) => new Promise((r) => setTimeout(() => r(structuredClone(v)), 150));
 
   return {
-    onAuthChange: (cb) => setTimeout(() => cb({ user: { id: me.id, email: me.email } }), 0),
-    signIn: async () => {},
+    onAuthChange: (cb) => { authCb = cb; setTimeout(() => cb(as === "new" ? null : { user: { id: me.id, email: me.email } }), 0); },
+    sendCode: (email) => { me.email = email; me.full_name = email.split("@")[0].split(/[._-]/).map((s) => s[0].toUpperCase() + s.slice(1)).join(" "); return wait(null); },
+    verifyCode: async (_email, code) => {
+      await wait(null);
+      if (!/^\d{6,10}$/.test(code)) throw new Error("Token has expired or is invalid");
+      setTimeout(() => authCb({ user: { id: me.id, email: me.email } }), 0);
+    },
     signOut: async () => { location.href = location.pathname + "?demo" + (asEmployee ? "" : "&as=employee"); },
     getProfile: () => wait(me),
-    setHomeLocation: (_uid, loc) => { me.home_location = loc; return wait(me); },
+    updateProfile: (_uid, patch) => { Object.assign(me, patch); return wait(me); },
     listTickets: ({ mineOnly, uid, statuses }) =>
       wait(visible().filter((x) => (!mineOnly || x.created_by === uid) && (!statuses || statuses.includes(x.status)))
         .sort((a, b) => b.created_at.localeCompare(a.created_at))),

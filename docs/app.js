@@ -35,6 +35,9 @@ const api = DEMO ? (await import("./demo.js")).createDemoApi() : await createSup
 
 async function createSupabaseApi() {
   if (CONFIG.SUPABASE_URL.includes("YOUR-")) return null;
+  if (!/^https:\/\/[a-z0-9]+\.supabase\.co\/?$/.test(CONFIG.SUPABASE_URL.trim())) {
+    return { configError: `SUPABASE_URL in docs/config.js should look like https://abcdefghijklmnop.supabase.co — it's currently "${CONFIG.SUPABASE_URL}". The sb_publishable_… key belongs in SUPABASE_ANON_KEY instead.` };
+  }
   const { createClient } = await import("https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm");
   const sb = createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY, {
     auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, flowType: "pkce" },
@@ -43,19 +46,14 @@ async function createSupabaseApi() {
 
   return {
     onAuthChange: (cb) => sb.auth.onAuthStateChange((_e, session) => setTimeout(() => cb(session), 0)),
-    signIn: () =>
-      sb.auth.signInWithOAuth({
-        provider: "azure",
-        options: {
-          scopes: "openid email profile",
-          redirectTo: location.origin + location.pathname,
-          queryParams: { domain_hint: CONFIG.COMPANY_DOMAIN },
-        },
-      }),
+    // Email sign-in: send a one-time code, then verify it inside the app
+    // (a clickable link would open in Safari, not the pinned Home Screen app).
+    sendCode: async (email) => ok(await sb.auth.signInWithOtp({ email, options: { shouldCreateUser: true } })),
+    verifyCode: async (email, token) => ok(await sb.auth.verifyOtp({ email, token, type: "email" })),
     signOut: () => sb.auth.signOut(),
     getProfile: async (uid) => ok(await sb.from("profiles").select("*").eq("id", uid).maybeSingle()),
-    setHomeLocation: async (uid, loc) =>
-      ok(await sb.from("profiles").update({ home_location: loc }).eq("id", uid).select().single()),
+    updateProfile: async (uid, patch) =>
+      ok(await sb.from("profiles").update(patch).eq("id", uid).select().single()),
     listTickets: async ({ mineOnly, uid, statuses }) => {
       let q = sb.from("tickets").select("*").order("created_at", { ascending: false }).limit(1000);
       if (mineOnly) q = q.eq("created_by", uid);
@@ -118,7 +116,6 @@ function h(tag, attrs, ...children) {
 }
 const svg = (markup) => { const s = h("span", { class: "icon", "aria-hidden": "true" }); s.innerHTML = markup; return s; };
 const ICONS = {
-  ms: '<svg viewBox="0 0 21 21" width="20" height="20"><rect x="1" y="1" width="9" height="9" fill="#f25022"/><rect x="11" y="1" width="9" height="9" fill="#7fba00"/><rect x="1" y="11" width="9" height="9" fill="#00a4ef"/><rect x="11" y="11" width="9" height="9" fill="#ffb900"/></svg>',
   camera: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>',
   bell: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>',
   back: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>',
@@ -278,6 +275,7 @@ function clearView() {
 
 function boot() {
   if (!api) return renderNotConfigured();
+  if (api.configError) return renderNotConfigured(api.configError);
   const err = readAuthError();
   if (err) renderLogin(err);
   api.onAuthChange(handleSession);
@@ -403,25 +401,107 @@ function shell(active, ...content) {
   updateLiveDot();
 }
 
-function renderLogin(message) {
-  root.replaceChildren(
-    h("div", { class: "login" },
-      h("div", { class: "login-card" },
-        h("img", { class: "login-logo", src: "icons/icon-192.png", alt: "" }),
-        h("h1", {}, "1915 South Help Desk"),
-        h("p", { class: "muted" }, `Sign in with your @${CONFIG.COMPANY_DOMAIN} Microsoft account.`),
-        message && h("p", { class: "form-error" }, message),
-        h("button", {
-          class: "btn btn-ms", type: "button",
-          onclick: async (e) => { e.currentTarget.disabled = true; try { await api.signIn(); } catch (err) { renderLogin(err.message); } },
-        }, svg(ICONS.ms), "Sign in with Microsoft"),
-        h("p", { class: "fine" }, "You'll stay signed in on this device."))));
+const LAST_EMAIL_KEY = "helpdesk.lastEmail";
+const DOMAIN = CONFIG.COMPANY_DOMAIN;
+
+function friendlyAuthError(err) {
+  const m = err?.message || String(err);
+  if (/database error|1915south/i.test(m)) return `Only @${DOMAIN} email addresses can sign in.`;
+  if (/rate limit|security purposes|after \d+ seconds/i.test(m)) return "Please wait a minute before asking for another code.";
+  if (/expired|invalid/i.test(m)) return "That code is wrong or has expired. Check your newest email, or send a new code.";
+  return m;
 }
 
-function renderNotConfigured() {
+function loginCard(...content) {
   root.replaceChildren(h("div", { class: "login" }, h("div", { class: "login-card" },
-    h("h1", {}, "Almost there"),
-    h("p", {}, "Open docs/config.js and fill in your Supabase URL and key (see SETUP.md, step 1)."),
+    h("img", { class: "login-logo", src: "icons/icon-192.png", alt: "" }),
+    h("h1", {}, "1915 South Help Desk"),
+    ...content)));
+}
+
+// Step 1: work email → we email a 6-digit code
+function renderLogin(message) {
+  let saved = "";
+  try { saved = localStorage.getItem(LAST_EMAIL_KEY) || ""; } catch {}
+  const email = h("input", { class: "input", type: "email", inputmode: "email", autocomplete: "email",
+    autocapitalize: "off", spellcheck: "false", placeholder: `yourname@${DOMAIN}`, value: saved });
+  const err = h("p", { class: "form-error" }, message || "");
+  const btn = h("button", { class: "btn btn-primary btn-lg", type: "submit" }, "Email me a code");
+  const form = h("form", { class: "login-form", novalidate: true, onsubmit: async (e) => {
+    e.preventDefault();
+    err.textContent = "";
+    let addr = email.value.trim().toLowerCase();
+    if (addr && !addr.includes("@")) addr += "@" + DOMAIN;
+    if (!addr.endsWith("@" + DOMAIN)) { err.textContent = `Use your @${DOMAIN} email address.`; return; }
+    btn.disabled = true; btn.textContent = "Sending…";
+    try {
+      await api.sendCode(addr);
+      try { localStorage.setItem(LAST_EMAIL_KEY, addr); } catch {}
+      renderCodeEntry(addr);
+    } catch (x) {
+      err.textContent = friendlyAuthError(x);
+      btn.disabled = false; btn.textContent = "Email me a code";
+    }
+  } },
+    h("label", { class: "label" }, "Work email", email), err, btn);
+  loginCard(
+    h("p", { class: "muted" }, `Sign in with your @${DOMAIN} email. We'll send you a 6-digit code.`),
+    form,
+    h("p", { class: "fine" }, "You only need to do this once on each device."));
+  if (!saved) email.focus();
+}
+
+// Step 2: type the code from the email (keeps sign-in inside the pinned app)
+function renderCodeEntry(addr) {
+  const code = h("input", { class: "input code-input", inputmode: "numeric", autocomplete: "one-time-code",
+    maxlength: "10", placeholder: "••••••", "aria-label": "Sign-in code",
+    oninput: (e) => (e.target.value = e.target.value.replace(/\D/g, "")) });
+  const err = h("p", { class: "form-error" });
+  const btn = h("button", { class: "btn btn-primary btn-lg", type: "submit" }, "Sign in");
+  const resend = h("button", { type: "button", class: "btn btn-link", onclick: async () => {
+    err.textContent = "";
+    try { await api.sendCode(addr); toast("New code sent", { type: "success" }); cooldown(); }
+    catch (x) { err.textContent = friendlyAuthError(x); }
+  } }, "Send a new code");
+  function cooldown(sec = 60) {
+    resend.disabled = true;
+    const tick = () => {
+      if (!resend.isConnected) return;
+      if (sec <= 0) { resend.disabled = false; resend.textContent = "Send a new code"; return; }
+      resend.textContent = `Send a new code (${sec--}s)`;
+      setTimeout(tick, 1000);
+    };
+    tick();
+  }
+  const form = h("form", { class: "login-form", novalidate: true, onsubmit: async (e) => {
+    e.preventDefault();
+    err.textContent = "";
+    const token = code.value.trim();
+    if (token.length < 6) { err.textContent = "Enter the code from the email."; return; }
+    btn.disabled = true; btn.textContent = "Signing in…";
+    try {
+      await api.verifyCode(addr, token); // success fires onAuthChange → app loads
+    } catch (x) {
+      err.textContent = friendlyAuthError(x);
+      btn.disabled = false; btn.textContent = "Sign in";
+    }
+  } },
+    h("label", { class: "label" }, "Sign-in code", code), err, btn);
+  loginCard(
+    h("p", { class: "muted" }, "We emailed a code to ", h("strong", {}, addr), ". It may take a minute — check Junk if you don't see it."),
+    form,
+    h("div", { class: "login-links" }, resend,
+      h("button", { type: "button", class: "btn btn-link", onclick: () => renderLogin() }, "Use a different email")));
+  cooldown();
+  code.focus();
+}
+
+function renderNotConfigured(problem) {
+  root.replaceChildren(h("div", { class: "login" }, h("div", { class: "login-card" },
+    h("h1", {}, problem ? "Setup needs a fix" : "Almost there"),
+    problem
+      ? h("p", { class: "form-error" }, problem)
+      : h("p", {}, "Open docs/config.js and fill in your Supabase URL and key (see SETUP.md, step 2)."),
     h("p", { class: "fine" }, "Want to look around first? ", h("a", { href: "?demo" }, "Open the demo")))));
 }
 
@@ -440,6 +520,9 @@ function renderError(e) {
 function renderSetup(firstTime) {
   clearView();
   let chosen = state.profile.home_location;
+  const nameInput = h("input", { class: "input", autocomplete: "name", maxlength: "80",
+    placeholder: "First and last name", value: state.profile.full_name || "" });
+  const nameErr = h("div", { class: "field-error" });
   const options = LOCATIONS.map((loc) =>
     h("button", {
       type: "button", class: `choice${loc === chosen ? " selected" : ""}`, "aria-pressed": String(loc === chosen),
@@ -452,18 +535,24 @@ function renderSetup(firstTime) {
   const save = h("button", {
     class: "btn btn-primary btn-lg", disabled: !chosen,
     onclick: async () => {
+      const full_name = nameInput.value.trim().replace(/\s+/g, " ");
+      nameErr.textContent = "";
+      if (full_name.length < 2) { nameErr.textContent = "Enter your name so the help desk knows who you are."; nameInput.focus(); return; }
       save.disabled = true;
       try {
-        state.profile = await api.setHomeLocation(state.profile.id, chosen);
-        toast("Home location saved", { type: "success" });
+        state.profile = await api.updateProfile(state.profile.id, { full_name, home_location: chosen });
+        toast(firstTime ? `Welcome, ${firstName(full_name)}!` : "Settings saved", { type: "success" });
         go(state.profile.is_admin ? "#/admin" : "#/new");
       } catch (e) { toast("Couldn't save", { type: "danger", detail: e.message }); save.disabled = false; }
     },
   }, firstTime ? "Continue" : "Save");
 
   const card = h("section", { class: "card narrow" },
-    h("h1", {}, firstTime ? `Welcome, ${firstName(state.profile.full_name)}!` : "Settings"),
-    h("p", { class: "muted" }, "Which location do you usually work at? We'll fill it in on your tickets — you can still change it on any ticket."),
+    h("h1", {}, firstTime ? "Welcome!" : "Settings"),
+    firstTime && h("p", { class: "muted" }, "Two quick things and you're set."),
+    h("div", { class: "field" }, h("label", { class: "label" }, "Your name", nameInput), nameErr),
+    h("div", { class: "label" }, "Home location"),
+    h("p", { class: "muted small" }, "Where you usually work. It's filled in on your tickets, and you can still change it on any ticket."),
     h("div", { class: "choice-grid" }, options),
     h("div", { class: "actions" }, save),
     !firstTime && h("hr"),
@@ -474,7 +563,9 @@ function renderSetup(firstTime) {
         onclick: () => setTheme(t.value) }, svg(ICONS[t.icon]), t.label))),
     !firstTime && h("hr"),
     !firstTime && h("p", { class: "muted small" }, `Signed in as ${state.profile.email}`),
-    !firstTime && h("button", { class: "btn btn-link danger", onclick: () => api.signOut() }, "Sign out"));
+    !firstTime && h("button", { class: "btn btn-link danger", onclick: () => api.signOut() }, "Sign out"),
+    firstTime && h("p", { class: "muted small" }, `Signed in as ${state.profile.email} · `,
+      h("button", { class: "btn-link inline", type: "button", onclick: () => api.signOut() }, "Not you?")));
 
   if (firstTime) root.replaceChildren(h("main", { class: "page" }, card));
   else shell("settings", card);

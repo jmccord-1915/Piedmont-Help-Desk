@@ -39,7 +39,8 @@ begin
     lower(new.email),
     coalesce(new.raw_user_meta_data->>'full_name',
              new.raw_user_meta_data->>'name',
-             split_part(new.email, '@', 1)),
+             -- sam.taylor@1915south.com → "Sam Taylor" (employee confirms it on first sign-in)
+             initcap(translate(split_part(new.email, '@', 1), '._-', '   '))),
     exists (select 1 from public.admin_emails a where a.email = lower(new.email))
   );
   return new;
@@ -194,9 +195,9 @@ create policy "profiles: read own or admin" on public.profiles
 drop policy if exists "profiles: update own" on public.profiles;
 create policy "profiles: update own" on public.profiles
   for update to authenticated using (id = auth.uid()) with check (id = auth.uid());
--- Employees may only change their home location (not is_admin, email, etc.)
+-- Employees may only change their name and home location (not is_admin, email, etc.)
 revoke insert, update, delete on public.profiles from anon, authenticated;
-grant update (home_location) on public.profiles to authenticated;
+grant update (home_location, full_name) on public.profiles to authenticated;
 
 drop policy if exists "tickets: read own or admin" on public.tickets;
 create policy "tickets: read own or admin" on public.tickets

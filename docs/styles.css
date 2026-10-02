@@ -199,7 +199,12 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 1.5rem 0 1rem; }
 .btn-link { background: none; border: 0; color: var(--link); text-decoration: underline; }
 .btn-link:hover { background: none; }
 .btn-link.danger { color: var(--high); }
-.btn-ms { width: 100%; min-height: 52px; font-size: 1.05rem; margin-top: .5rem; }
+.btn-link.inline { padding: 0; min-height: 0; font: inherit; cursor: pointer; }
+.login-form { text-align: left; margin-top: 1.25rem; }
+.login-form .btn-lg { margin-top: .75rem; }
+.login-links { display: flex; flex-wrap: wrap; justify-content: center; gap: .25rem 1rem; margin-top: .75rem; }
+.login-links .btn-link { font-size: .9rem; }
+.code-input { font-size: 28px; letter-spacing: .35em; text-align: center; font-variant-numeric: tabular-nums; }
 :focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 
 /* ---------- Forms ---------- */

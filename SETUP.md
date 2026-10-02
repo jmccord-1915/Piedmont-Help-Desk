@@ -65,38 +65,56 @@ insert into admin_emails values ('someone@1915south.com');
 update profiles set is_admin = true where email = 'someone@1915south.com';
 ```
 
-## 4. Register the sign-in app in Microsoft Entra
+> **Already ran `01_schema.sql` before the switch to email sign-in?** Also run
+> `supabase/03_email_signin_update.sql` the same way. It lets employees set their own name.
 
-1. Go to <https://entra.microsoft.com> → **Applications → App registrations → New registration**.
-   - Name: `1915 South Help Desk`
-   - Supported account types: **Accounts in this organizational directory only (single tenant)** ← this is what limits sign-in to @1915south.com
-   - Redirect URI: platform **Web**, value `https://YOUR-PROJECT-REF.supabase.co/auth/v1/callback`
-   - Click **Register**.
-2. On the Overview page copy the **Application (client) ID** and **Directory (tenant) ID**.
-3. **Certificates & secrets → New client secret** → 24 months → copy the **Value** (not the ID). Put a calendar reminder to renew it before it expires.
-4. **Token configuration → Add optional claim** → token type **ID** → check `email` and `xms_edov` → Add (accept the prompt to add the Microsoft Graph email permission).
+## 4. Turn on email-code sign-in
 
-## 5. Turn on Microsoft sign-in in Supabase
+Employees type their @1915south.com email, get a 6-digit code, and type it into the app.
+(No Microsoft setup needed. Only @1915south.com addresses are accepted — the database enforces it.)
 
-1. Supabase → **Authentication → Sign In / Providers → Azure** → enable.
-2. Client ID = the Application (client) ID · Secret = the secret Value
-3. Azure Tenant URL = `https://login.microsoftonline.com/YOUR-TENANT-ID`
-4. Save.
+1. Supabase → **Authentication → Sign In / Providers → Email**. Make sure it's **enabled**, then **Save**.
+   *(If you turned on **Azure** earlier, you can switch it off here.)*
+2. Supabase → **Authentication → Emails** (Templates). Open **Magic Link**, and replace it with:
+   - Subject: `Your Help Desk sign-in code`
+   - Body:
+     ```html
+     <h2>Your Help Desk sign-in code</h2>
+     <p style="font-size:30px;letter-spacing:6px;font-weight:bold">{{ .Token }}</p>
+     <p>Type this code into the Help Desk app. It expires in 1 hour.</p>
+     <p>If you didn't try to sign in, you can ignore this email.</p>
+     ```
+   - **Save**.
+3. Open the **Confirm signup** template and paste the **same subject and body**. Save.
+   (First-time users get this one; returning users get Magic Link. Both need to show the code.)
 
-## 6. Tell Supabase your website address
+## 5. Tell Supabase your website address
 
 Supabase → **Authentication → URL Configuration**:
 - Site URL: `YOUR-SITE/` (e.g. `https://1915south.github.io/helpdesk/`)
 - Redirect URLs → Add: `YOUR-SITE/**` (e.g. `https://1915south.github.io/helpdesk/**`)
 
-## 7. Test sign-in
+## 6. Test sign-in
 
-Open `YOUR-SITE`, click **Sign in with Microsoft**, pick your home location. You should land on the Dashboard.
-Submit a test ticket from **New Ticket** and watch it appear.
+1. Open `YOUR-SITE` and press **Ctrl + F5**.
+2. Enter `jmccord@1915south.com` → **Email me a code**.
+3. Check your Outlook (and **Junk**) for the code → type it in → **Sign in**.
+4. Confirm your name, pick your home location → you should land on the Dashboard.
+5. Submit a test ticket from **New Ticket** and watch it appear.
+
+## 7. ⚠️ Before employees use it: set up an email sender
+
+Supabase's built-in email is **for testing only**. It sends just a few emails per hour, and it may only
+deliver to people on your Supabase team. That's fine for you to test, but employees' codes won't arrive reliably.
+
+To fix it, plug a real email service into Supabase: **Authentication → Emails → SMTP Settings**. This is
+the same "email" problem as the daily recap below, so solve them together. Note that sending email
+*as* @1915south.com addresses usually needs your company's DNS or Microsoft 365 settings, which
+means involving whoever manages them.
 
 ---
 
-## 8. Daily recap email — register the mailer
+## 8. Daily recap email — register the mailer *(on hold — needs Microsoft 365 admin approval)*
 
 A separate app registration that can only send email (kept apart from sign-in on purpose).
 
@@ -154,8 +172,9 @@ It handles daylight saving automatically.
 > **New: Help Desk app**
 > 1. On your iPad, open **Safari** and go to **YOUR-SITE**
 > 2. Tap the **Share** button (square with arrow) → **Add to Home Screen** → **Add**.
-> 3. Open **Help Desk** from your Home Screen and sign in with your 1915south.com Microsoft account.
-> 4. Pick your home store. That's it — you'll stay signed in.
+> 3. Open **Help Desk** from your Home Screen, enter your @1915south.com email, and tap **Email me a code**.
+> 4. Open Outlook, find the 6-digit code (check Junk), switch back to Help Desk, and type it in.
+> 5. Enter your name and pick your home store. That's it — you'll stay signed in.
 
 Sign in *after* adding to the Home Screen: the Home Screen app keeps its own sign-in, separate from Safari.
 
@@ -170,6 +189,6 @@ Sign in *after* adding to the Home Screen: the Home Screen app keeps its own sig
 ## Good to know
 
 - **Cost:** GitHub Pages (public repo) and the Supabase free tier cover this. Supabase pauses free projects after ~7 days with *no* activity; normal daily use prevents that. The Pro plan ($25/mo) adds daily backups and never pauses — worth it once you depend on this.
-- **Secrets expire:** both Entra client secrets expire (max 24 months). When one does, sign-in or the recap email stops — create a new secret and paste it into the same place.
+- **Signed out?** Employees stay signed in on their iPad. If they get signed out (for example after clearing Safari data or reinstalling the Home Screen icon), they just request a new code.
 - **Adding a location:** edit the `LOCATIONS` list in `docs/app.js` and the two location lists in `supabase/01_schema.sql`, then re-run the changed part in Supabase (ask Claude to make the change).
 - **Who sees what:** employees only see their own tickets. Only admins see everything and can change status/priority. This is enforced by the database, not just the screen — which is also why a public repo is safe.
