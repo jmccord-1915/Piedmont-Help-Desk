@@ -23,6 +23,8 @@ create table if not exists public.profiles (
                   '1201 Greensboro','1202 Winston Salem','1203 Burlington',
                   '1204 Danville','1205 Greensboro Outlet','DC')),
   is_admin      boolean not null default false,
+  must_change_password boolean not null default true,  -- employee must replace the starting password
+  disabled      boolean not null default false,           -- access turned off by an admin
   created_at    timestamptz not null default now()
 );
 
@@ -33,7 +35,7 @@ begin
   if not coalesce(lower(new.email) like '%@1915south.com', false) then
     raise exception 'Only @1915south.com accounts may sign in';
   end if;
-  insert into public.profiles (id, email, full_name, is_admin)
+  insert into public.profiles (id, email, full_name, is_admin, must_change_password)
   values (
     new.id,
     lower(new.email),
@@ -41,10 +43,20 @@ begin
              new.raw_user_meta_data->>'name',
              -- sam.taylor@1915south.com → "Sam Taylor" (employee confirms it on first sign-in)
              initcap(translate(split_part(new.email, '@', 1), '._-', '   '))),
-    exists (select 1 from public.admin_emails a where a.email = lower(new.email))
+    exists (select 1 from public.admin_emails a where a.email = lower(new.email)),
+    -- Admins set their own password; employees get a starting password they must replace.
+    not exists (select 1 from public.admin_emails a where a.email = lower(new.email))
   );
   return new;
 end $$;
+
+-- Called by the app right after an employee chooses their own password.
+create or replace function public.mark_password_changed()
+returns void language sql security definer set search_path = public as $$
+  update public.profiles set must_change_password = false where id = auth.uid();
+$$;
+revoke execute on function public.mark_password_changed() from public, anon;
+grant execute on function public.mark_password_changed() to authenticated;
 
 drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created

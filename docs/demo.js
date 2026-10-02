@@ -1,14 +1,21 @@
 // In-memory demo data so you can click around without Supabase.
 // Open the app with ?demo (admin view), ?demo&as=employee, or ?demo&as=new
-// (signed out — shows the email-code sign-in; any 6-digit code works).
+// (signed out — a brand-new employee's first sign-in; any password works).
 export function createDemoApi() {
   const as = new URLSearchParams(location.search).get("as");
   const asEmployee = as === "employee" || as === "new";
-  const admin = { id: "u-admin", email: "jmccord@1915south.com", full_name: "J. McCord", home_location: "DC", is_admin: true };
-  const emp = { id: "u-emp", email: "sam.taylor@1915south.com", full_name: "Sam Taylor", home_location: "1201 Greensboro", is_admin: false };
+  const base = { must_change_password: false, disabled: false, last_sign_in_at: new Date(Date.now() - 3600e3).toISOString() };
+  const admin = { ...base, id: "u-admin", email: "jmccord@1915south.com", full_name: "J. McCord", home_location: "DC", is_admin: true };
+  const emp = { ...base, id: "u-emp", email: "sam.taylor@1915south.com", full_name: "Sam Taylor", home_location: "1201 Greensboro", is_admin: false };
   const me = asEmployee ? emp : admin;
   let authCb = null;
-  if (as === "new") Object.assign(me, { home_location: null });
+  if (as === "new") Object.assign(me, { home_location: null, must_change_password: true });
+  const people = [admin, emp,
+    { ...base, id: "u-3", email: "dana.price@1915south.com", full_name: "Dana Price", home_location: "1203 Burlington", is_admin: false },
+    { ...base, id: "u-4", email: "chris.lee@1915south.com", full_name: "Chris Lee", home_location: null, is_admin: false, must_change_password: true, last_sign_in_at: null },
+    { ...base, id: "u-5", email: "pat.old@1915south.com", full_name: "Pat Oldham", home_location: "DC", is_admin: false, disabled: true },
+  ];
+  const demoPw = () => ["Maple", "River", "Cedar", "Robin"][Math.floor(Math.random() * 4)] + "-Stone-" + (1000 + Math.floor(Math.random() * 9000));
   const ago = (h) => new Date(Date.now() - h * 3600e3).toISOString();
 
   let nextId = 1009, nextComment = 10;
@@ -54,11 +61,29 @@ export function createDemoApi() {
 
   return {
     onAuthChange: (cb) => { authCb = cb; setTimeout(() => cb(as === "new" ? null : { user: { id: me.id, email: me.email } }), 0); },
-    sendCode: (email) => { me.email = email; me.full_name = email.split("@")[0].split(/[._-]/).map((s) => s[0].toUpperCase() + s.slice(1)).join(" "); return wait(null); },
-    verifyCode: async (_email, code) => {
+    signIn: async (email, password) => {
       await wait(null);
-      if (!/^\d{6,10}$/.test(code)) throw new Error("Token has expired or is invalid");
+      if (password.length < 3) throw new Error("Invalid login credentials");
+      me.email = email;
+      me.full_name = email.split("@")[0].split(/[._-]/).map((s) => s[0].toUpperCase() + s.slice(1)).join(" ");
       setTimeout(() => authCb({ user: { id: me.id, email: me.email } }), 0);
+    },
+    changePassword: async () => { await wait(null); me.must_change_password = false; },
+    adminUsers: async (action, p = {}) => {
+      await wait(null);
+      const u = people.find((x) => x.id === p.user_id);
+      switch (action) {
+        case "list": return { users: structuredClone(people) };
+        case "create": return { results: p.people.map((x) => {
+          if (people.some((y) => y.email === x.email)) return { ...x, status: "exists", message: "Already has an account" };
+          const name = x.name || x.email.split("@")[0].split(/[._-]/).map((s) => s[0].toUpperCase() + s.slice(1)).join(" ");
+          people.push({ ...base, id: "u-" + Math.random(), email: x.email, full_name: name, home_location: null, is_admin: false, must_change_password: true, last_sign_in_at: null });
+          return { ...x, status: "created", password: demoPw() };
+        }) };
+        case "reset": Object.assign(u, { must_change_password: true, disabled: false }); return { email: u.email, password: demoPw() };
+        case "disable": u.disabled = true; return { ok: true };
+        case "enable": u.disabled = false; return { ok: true };
+      }
     },
     signOut: async () => { location.href = location.pathname + "?demo" + (asEmployee ? "" : "&as=employee"); },
     getProfile: () => wait(me),

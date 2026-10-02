@@ -204,7 +204,42 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 1.5rem 0 1rem; }
 .login-form .btn-lg { margin-top: .75rem; }
 .login-links { display: flex; flex-wrap: wrap; justify-content: center; gap: .25rem 1rem; margin-top: .75rem; }
 .login-links .btn-link { font-size: .9rem; }
-.code-input { font-size: 28px; letter-spacing: .35em; text-align: center; font-variant-numeric: tabular-nums; }
+.login-form .label { margin-bottom: .9rem; }
+.pw-wrap { position: relative; margin-top: .4rem; }
+.label > .pw-wrap .input { margin-top: 0; padding-right: 4.5rem; }
+.pw-toggle {
+  position: absolute; right: .35rem; top: 50%; transform: translateY(-50%);
+  border: 0; background: transparent; color: var(--link); font: inherit; font-size: .9rem; font-weight: 600;
+  padding: .45rem .6rem; border-radius: 8px; cursor: pointer;
+}
+.pw-toggle:hover { background: var(--surface); }
+
+/* ---------- Employees (admin) ---------- */
+.row-actions { display: flex; flex-wrap: wrap; gap: .4rem; justify-content: flex-end; }
+.btn-danger-outline { color: var(--high); border-color: var(--high-bg); }
+.btn-danger-outline:hover { background: var(--high-bg); }
+.people-table tr.row-off td { opacity: .6; }
+.card-pad { padding: 1rem; }
+.slip {
+  border: 2px dashed var(--input-border); border-radius: 12px; padding: 1rem 1.1rem; margin-top: .75rem;
+  break-inside: avoid; page-break-inside: avoid;
+}
+.slip-title { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.slip-name { font-size: 1.15rem; font-weight: 700; margin: .15rem 0 .5rem; }
+.slip dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; margin: 0 0 .5rem; }
+.slip dt { color: var(--muted); font-weight: 600; }
+.slip dd { margin: 0; overflow-wrap: anywhere; }
+.slip-pw { font-size: 1.15rem; font-weight: 700; letter-spacing: .03em; }
+.slip-help { font-size: .85rem; color: var(--muted); }
+
+@media print {
+  body.print-slips { background: #fff; color: #000; }
+  body.print-slips .topbar, body.print-slips #toasts, body.print-slips .no-print { display: none !important; }
+  body.print-slips .page { padding: 0; max-width: none; }
+  body.print-slips .card { box-shadow: none; border: 0; padding: 0; background: #fff; }
+  body.print-slips .slip { border-color: #888; color: #000; background: #fff; }
+  body.print-slips .slip-title, body.print-slips .slip dt, body.print-slips .slip-help { color: #444; }
+}
 :focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 
 /* ---------- Forms ---------- */
@@ -416,4 +451,8 @@ textarea.input { resize: vertical; }
   .tickets-table td:nth-child(4), .tickets-table td:nth-child(5) { grid-column: span 1; font-size: .85rem; color: var(--muted); order: 6; }
   .tickets-table td:nth-child(6) { order: 2; }
   .tickets-table td:nth-child(7) { order: 3; text-align: right; font-size: .85rem; }
+
+  .people-table tr { padding: .75rem .9rem; border-bottom: 1px solid var(--border); }
+  .people-table td { margin-bottom: .35rem; }
+  .people-table .row-actions { justify-content: flex-start; }
 }

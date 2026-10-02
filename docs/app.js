@@ -46,10 +46,23 @@ async function createSupabaseApi() {
 
   return {
     onAuthChange: (cb) => sb.auth.onAuthStateChange((_e, session) => setTimeout(() => cb(session), 0)),
-    // Email sign-in: send a one-time code, then verify it inside the app
-    // (a clickable link would open in Safari, not the pinned Home Screen app).
-    sendCode: async (email) => ok(await sb.auth.signInWithOtp({ email, options: { shouldCreateUser: true } })),
-    verifyCode: async (email, token) => ok(await sb.auth.verifyOtp({ email, token, type: "email" })),
+    // Email + password. Accounts are created by an admin (Employees page); self-signup is off.
+    signIn: async (email, password) => ok(await sb.auth.signInWithPassword({ email, password })),
+    changePassword: async (password) => {
+      ok(await sb.auth.updateUser({ password }));
+      ok(await sb.rpc("mark_password_changed"));
+    },
+    // Admin-only actions run in the "admin-users" Edge Function (it holds the key that can create accounts).
+    adminUsers: async (action, payload = {}) => {
+      const { data, error } = await sb.functions.invoke("admin-users", { body: { action, ...payload } });
+      if (error) {
+        let msg = error.message;
+        try { msg = (await error.context.json()).error || msg; } catch {}
+        if (/failed to send|not found|404/i.test(msg)) msg = "The admin-users function isn't set up yet (see SETUP.md).";
+        throw new Error(msg);
+      }
+      return data;
+    },
     signOut: () => sb.auth.signOut(),
     getProfile: async (uid) => ok(await sb.from("profiles").select("*").eq("id", uid).maybeSingle()),
     updateProfile: async (uid, patch) =>
@@ -313,10 +326,12 @@ async function handleSession(session) {
     }
     const profile = await api.getProfile(session.user.id);
     if (!profile) throw new Error("Your profile wasn't created. Ask the help desk admin.");
+    if (profile.disabled) {
+      await api.signOut();
+      return renderLogin("Your Help Desk access has been turned off. Contact the help desk admin.");
+    }
     state.profile = profile;
-    if (location.search.includes("code=")) history.replaceState(null, "", location.pathname + location.hash);
     if (profile.is_admin) startAdminAlerts();
-    if (!profile.home_location) return renderSetup(true);
     const home = profile.is_admin ? "#/admin" : "#/new";
     go(!location.hash || location.hash === "#" || location.hash === "#/" ? home : location.hash);
   } catch (e) {
@@ -334,6 +349,8 @@ function go(hash) {
 
 function route() {
   if (!state.profile) return;
+  // First sign-in: choose a password, then name + home location.
+  if (state.profile.must_change_password) return renderChangePassword();
   if (!state.profile.home_location) return renderSetup(true);
   clearView();
   state.navSeq = (state.navSeq || 0) + 1;
@@ -345,6 +362,7 @@ function route() {
     case "mine": return viewMyTickets();
     case "ticket": return viewTicket(Number(parts[1]));
     case "settings": return renderSetup(false);
+    case "employees": if (isAdmin) return viewEmployees(); // falls through for non-admins
     case "admin": if (isAdmin) return viewAdmin(); // falls through for non-admins
     default: location.hash = isAdmin ? "#/admin" : "#/new";
   }
@@ -390,7 +408,8 @@ function shell(active, ...content) {
     h("nav", { class: "nav" },
       p.is_admin && link("#/admin", "Dashboard", "admin"),
       link("#/new", "New Ticket", "new"),
-      link("#/mine", "My Tickets", "mine")),
+      link("#/mine", "My Tickets", "mine"),
+      p.is_admin && link("#/employees", "Employees", "employees")),
     h("div", { class: "topbar-right" },
       p.is_admin && h("span", { id: "live-dot", class: "live off" }, h("span", { class: "pulse" }), "…"),
       themeButton(),
@@ -406,9 +425,11 @@ const DOMAIN = CONFIG.COMPANY_DOMAIN;
 
 function friendlyAuthError(err) {
   const m = err?.message || String(err);
-  if (/database error|1915south/i.test(m)) return `Only @${DOMAIN} email addresses can sign in.`;
-  if (/rate limit|security purposes|after \d+ seconds/i.test(m)) return "Please wait a minute before asking for another code.";
-  if (/expired|invalid/i.test(m)) return "That code is wrong or has expired. Check your newest email, or send a new code.";
+  if (/invalid login credentials/i.test(m)) return "That email and password don't match. Check for typos, or ask the help desk admin to reset your password.";
+  if (/banned/i.test(m)) return "Your Help Desk access has been turned off. Contact the help desk admin.";
+  if (/rate limit|too many|security purposes/i.test(m)) return "Too many tries. Please wait a few minutes and try again.";
+  if (/different from the old/i.test(m)) return "Choose a password that's different from your starting password.";
+  if (/failed to fetch|network/i.test(m)) return "Can't reach the Help Desk. Check your Wi-Fi and try again.";
   return m;
 }
 
@@ -419,81 +440,102 @@ function loginCard(...content) {
     ...content)));
 }
 
-// Step 1: work email → we email a 6-digit code
+// sam.taylor@1915south.com → "Sam Taylor" (same rule the database uses)
+const guessName = (email) => String(email).split("@")[0].split(/[._-]+/).filter(Boolean)
+  .map((s) => s[0].toUpperCase() + s.slice(1)).join(" ");
+const normalizeEmail = (v) => {
+  const s = String(v || "").trim().toLowerCase();
+  return s && !s.includes("@") ? `${s}@${DOMAIN}` : s;
+};
+
+// Password box with a Show/Hide toggle (typing passwords on an iPad is error-prone)
+function passwordInput(attrs) {
+  const input = h("input", { class: "input", type: "password", autocapitalize: "off", spellcheck: "false", ...attrs });
+  const toggle = h("button", { type: "button", class: "pw-toggle", "aria-label": "Show password",
+    onclick: () => {
+      const show = input.type === "password";
+      input.type = show ? "text" : "password";
+      toggle.textContent = show ? "Hide" : "Show";
+      toggle.setAttribute("aria-label", show ? "Hide password" : "Show password");
+    } }, "Show");
+  return { input, el: h("div", { class: "pw-wrap" }, input, toggle) };
+}
+
 function renderLogin(message) {
   let saved = "";
   try { saved = localStorage.getItem(LAST_EMAIL_KEY) || ""; } catch {}
-  const email = h("input", { class: "input", type: "email", inputmode: "email", autocomplete: "email",
+  const email = h("input", { class: "input", type: "email", inputmode: "email", autocomplete: "username",
     autocapitalize: "off", spellcheck: "false", placeholder: `yourname@${DOMAIN}`, value: saved });
+  const pw = passwordInput({ autocomplete: "current-password", placeholder: "Password" });
   const err = h("p", { class: "form-error" }, message || "");
-  const btn = h("button", { class: "btn btn-primary btn-lg", type: "submit" }, "Email me a code");
-  const form = h("form", { class: "login-form", novalidate: true, onsubmit: async (e) => {
-    e.preventDefault();
-    err.textContent = "";
-    let addr = email.value.trim().toLowerCase();
-    if (addr && !addr.includes("@")) addr += "@" + DOMAIN;
-    if (!addr.endsWith("@" + DOMAIN)) { err.textContent = `Use your @${DOMAIN} email address.`; return; }
-    btn.disabled = true; btn.textContent = "Sending…";
-    try {
-      await api.sendCode(addr);
-      try { localStorage.setItem(LAST_EMAIL_KEY, addr); } catch {}
-      renderCodeEntry(addr);
-    } catch (x) {
-      err.textContent = friendlyAuthError(x);
-      btn.disabled = false; btn.textContent = "Email me a code";
-    }
-  } },
-    h("label", { class: "label" }, "Work email", email), err, btn);
-  loginCard(
-    h("p", { class: "muted" }, `Sign in with your @${DOMAIN} email. We'll send you a 6-digit code.`),
-    form,
-    h("p", { class: "fine" }, "You only need to do this once on each device."));
-  if (!saved) email.focus();
-}
-
-// Step 2: type the code from the email (keeps sign-in inside the pinned app)
-function renderCodeEntry(addr) {
-  const code = h("input", { class: "input code-input", inputmode: "numeric", autocomplete: "one-time-code",
-    maxlength: "10", placeholder: "••••••", "aria-label": "Sign-in code",
-    oninput: (e) => (e.target.value = e.target.value.replace(/\D/g, "")) });
-  const err = h("p", { class: "form-error" });
   const btn = h("button", { class: "btn btn-primary btn-lg", type: "submit" }, "Sign in");
-  const resend = h("button", { type: "button", class: "btn btn-link", onclick: async () => {
-    err.textContent = "";
-    try { await api.sendCode(addr); toast("New code sent", { type: "success" }); cooldown(); }
-    catch (x) { err.textContent = friendlyAuthError(x); }
-  } }, "Send a new code");
-  function cooldown(sec = 60) {
-    resend.disabled = true;
-    const tick = () => {
-      if (!resend.isConnected) return;
-      if (sec <= 0) { resend.disabled = false; resend.textContent = "Send a new code"; return; }
-      resend.textContent = `Send a new code (${sec--}s)`;
-      setTimeout(tick, 1000);
-    };
-    tick();
-  }
   const form = h("form", { class: "login-form", novalidate: true, onsubmit: async (e) => {
     e.preventDefault();
     err.textContent = "";
-    const token = code.value.trim();
-    if (token.length < 6) { err.textContent = "Enter the code from the email."; return; }
+    const addr = normalizeEmail(email.value);
+    if (!addr.endsWith("@" + DOMAIN)) { err.textContent = `Use your @${DOMAIN} email address.`; return; }
+    if (!pw.input.value) { err.textContent = "Enter your password."; pw.input.focus(); return; }
     btn.disabled = true; btn.textContent = "Signing in…";
     try {
-      await api.verifyCode(addr, token); // success fires onAuthChange → app loads
+      await api.signIn(addr, pw.input.value); // success fires onAuthChange → app loads
+      try { localStorage.setItem(LAST_EMAIL_KEY, addr); } catch {}
     } catch (x) {
       err.textContent = friendlyAuthError(x);
       btn.disabled = false; btn.textContent = "Sign in";
     }
   } },
-    h("label", { class: "label" }, "Sign-in code", code), err, btn);
+    h("label", { class: "label" }, "Work email", email),
+    h("label", { class: "label" }, "Password", pw.el),
+    err, btn);
   loginCard(
-    h("p", { class: "muted" }, "We emailed a code to ", h("strong", {}, addr), ". It may take a minute — check Junk if you don't see it."),
+    h("p", { class: "muted" }, `Sign in with your @${DOMAIN} email and password.`),
     form,
-    h("div", { class: "login-links" }, resend,
-      h("button", { type: "button", class: "btn btn-link", onclick: () => renderLogin() }, "Use a different email")));
-  cooldown();
-  code.focus();
+    h("p", { class: "fine" }, "First time? Use the starting password from your manager. ",
+      "Forgot your password? Ask the help desk admin to reset it."));
+  (saved ? pw.input : email).focus();
+}
+
+// Choose-a-password form, used on first sign-in and in Settings.
+function passwordForm({ submitLabel, onDone }) {
+  const pw1 = passwordInput({ autocomplete: "new-password", placeholder: "At least 8 characters" });
+  const pw2 = passwordInput({ autocomplete: "new-password", placeholder: "Type it again" });
+  const err = h("p", { class: "form-error" });
+  const btn = h("button", { class: "btn btn-primary btn-lg", type: "submit" }, submitLabel);
+  return h("form", { class: "login-form", novalidate: true, onsubmit: async (e) => {
+    e.preventDefault();
+    err.textContent = "";
+    const a = pw1.input.value, b = pw2.input.value;
+    if (a.length < 8) { err.textContent = "Use at least 8 characters."; pw1.input.focus(); return; }
+    if (a !== b) { err.textContent = "The two passwords don't match."; pw2.input.focus(); return; }
+    btn.disabled = true; btn.textContent = "Saving…";
+    try {
+      await api.changePassword(a);
+      state.profile.must_change_password = false;
+      onDone();
+    } catch (x) {
+      err.textContent = friendlyAuthError(x);
+      btn.disabled = false; btn.textContent = submitLabel;
+    }
+  } },
+    h("label", { class: "label" }, "New password", pw1.el),
+    h("label", { class: "label" }, "Confirm new password", pw2.el),
+    err, btn);
+}
+
+function renderChangePassword() {
+  clearView();
+  const form = passwordForm({
+    submitLabel: "Save password",
+    onDone: () => { toast("Password saved", { type: "success" }); route(); },
+  });
+  root.replaceChildren(h("div", { class: "login" }, h("div", { class: "login-card" },
+    h("img", { class: "login-logo", src: "icons/icon-192.png", alt: "" }),
+    h("h1", {}, "Choose your password"),
+    h("p", { class: "muted" }, "Replace your starting password with one only you know. You'll use it if you ever need to sign in again."),
+    form,
+    h("p", { class: "fine" }, `Signed in as ${state.profile.email} · `,
+      h("button", { class: "btn-link inline", type: "button", onclick: () => api.signOut() }, "Not you?")))));
+  form.querySelector("input").focus();
 }
 
 function renderNotConfigured(problem) {
@@ -561,6 +603,12 @@ function renderSetup(firstTime) {
     !firstTime && h("div", { class: "choice-grid three", role: "group", "aria-label": "Appearance" },
       THEMES.map((t) => h("button", { type: "button", class: "choice", "data-theme-choice": t.value,
         onclick: () => setTheme(t.value) }, svg(ICONS[t.icon]), t.label))),
+    !firstTime && h("hr"),
+    !firstTime && h("h2", {}, "Change password"),
+    !firstTime && passwordForm({
+      submitLabel: "Change password",
+      onDone: () => { toast("Password changed", { type: "success" }); renderSetup(false); },
+    }),
     !firstTime && h("hr"),
     !firstTime && h("p", { class: "muted small" }, `Signed in as ${state.profile.email}`),
     !firstTime && h("button", { class: "btn btn-link danger", onclick: () => api.signOut() }, "Sign out"),
@@ -856,6 +904,165 @@ function viewAdmin() {
   state.onResume = load;
   const tick = setInterval(draw, 60_000); // keep "age" fresh
   state.cleanup.push(() => clearInterval(tick));
+}
+
+// ---------------------------------------------------------------------
+// Admin: Employees (add accounts, reset passwords, turn access off/on)
+// ---------------------------------------------------------------------
+
+// Accepts lines like "sam.taylor@1915south.com", "Dana Price, dana.price@1915south.com",
+// "Dana Price <dana.price@…>", or just "sam.taylor".
+function parsePeople(text) {
+  const seen = new Set();
+  const people = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const m = line.match(/[^\s,;<>"]+@[^\s,;<>"]+/);
+    let email, name;
+    if (m) {
+      email = m[0].toLowerCase();
+      name = line.replace(m[0], "").replace(/[<>",;\t]/g, " ").replace(/\s+/g, " ").trim();
+    } else if (/^[a-z0-9._-]+$/i.test(line)) {
+      email = normalizeEmail(line); name = "";
+    } else {
+      people.push({ email: line, name: "", bad: true });
+      continue;
+    }
+    if (seen.has(email)) continue;
+    seen.add(email);
+    people.push({ email, name });
+  }
+  return people;
+}
+
+function viewEmployees() {
+  const nav = state.navSeq;
+  const siteUrl = location.origin + location.pathname;
+  let users = [];
+  let filter = "";
+
+  const resultsArea = h("div");
+  const listBody = h("div", {}, h("div", { class: "spinner" }));
+  const countEl = h("span", { class: "muted small" });
+
+  // ----- Add employees -----
+  const textarea = h("textarea", { class: "input", rows: "6",
+    placeholder: `One person per line, for example:\nsam.taylor@${DOMAIN}\nDana Price, dana.price@${DOMAIN}\nchris.lee` });
+  const addErr = h("div", { class: "form-error" });
+  const addBtn = h("button", { type: "button", class: "btn btn-primary", onclick: async () => {
+    addErr.textContent = "";
+    const people = parsePeople(textarea.value);
+    const bad = people.filter((p) => p.bad || !p.email.endsWith("@" + DOMAIN));
+    if (!people.length) { addErr.textContent = "Paste at least one email address."; return; }
+    if (bad.length) { addErr.textContent = `These aren't @${DOMAIN} addresses: ${bad.map((p) => p.email).join(", ")}`; return; }
+    addBtn.disabled = true; addBtn.textContent = `Adding ${people.length}…`;
+    try {
+      const { results } = await api.adminUsers("create", { people });
+      showCredentials(results.filter((r) => r.status === "created"), results.filter((r) => r.status !== "created"));
+      textarea.value = "";
+      load();
+    } catch (e) { addErr.textContent = e.message; }
+    addBtn.disabled = false; addBtn.textContent = "Add employees";
+  } }, "Add employees");
+
+  // ----- Starting passwords (printable) -----
+  function showCredentials(created, problems = [], heading = "New accounts") {
+    const printBtn = h("button", { type: "button", class: "btn", onclick: () => {
+      document.body.classList.add("print-slips");
+      window.print();
+      setTimeout(() => document.body.classList.remove("print-slips"), 500);
+    } }, "Print sign-in slips");
+    resultsArea.replaceChildren(h("section", { class: "card print-area" },
+      h("div", { class: "page-head no-print" }, h("h2", {}, heading),
+        h("div", { class: "row-actions" }, created.length > 0 && printBtn,
+          h("button", { type: "button", class: "btn", onclick: () => resultsArea.replaceChildren() }, "Done"))),
+      created.length > 0 && h("p", { class: "muted small no-print" },
+        "Give each person their starting password (print the slips, or read it to them). This is the only time it's shown — they'll replace it the first time they sign in."),
+      created.map((c) => h("div", { class: "slip" },
+        h("div", { class: "slip-title" }, "1915 South Help Desk — sign-in"),
+        h("div", { class: "slip-name" }, c.name || guessName(c.email)),
+        h("dl", {},
+          h("dt", {}, "Website"), h("dd", {}, siteUrl),
+          h("dt", {}, "Email"), h("dd", { class: "mono" }, c.email),
+          h("dt", {}, "Starting password"), h("dd", { class: "mono slip-pw" }, c.password)),
+        h("div", { class: "slip-help" },
+          "On your iPad: open the website in Safari → Share → Add to Home Screen. Open Help Desk from your Home Screen, sign in, then choose your own password."))),
+      problems.length > 0 && h("div", { class: "no-print" },
+        h("h2", {}, "Not added"),
+        h("ul", {}, problems.map((p) => h("li", {}, h("span", { class: "mono" }, p.email), ` — ${p.message}`))))));
+    resultsArea.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  // ----- Employee list -----
+  function statusBadgeFor(u) {
+    if (u.disabled) return h("span", { class: "badge status-resolved" }, "Access off");
+    if (u.is_admin) return h("span", { class: "badge status-in-progress" }, "Admin");
+    if (u.must_change_password) return h("span", { class: "badge prio-medium" }, "Hasn't signed in yet");
+    return h("span", { class: "badge prio-low" }, "Active");
+  }
+
+  async function act(u, action) {
+    const who = u.full_name || u.email;
+    const prompts = {
+      reset: `Give ${who} a new starting password? Their current password will stop working.`,
+      disable: `Turn off Help Desk access for ${who}? They'll be signed out within an hour. Their tickets are kept.`,
+      enable: `Turn Help Desk access back on for ${who}?`,
+    };
+    if (!confirm(prompts[action])) return;
+    try {
+      const res = await api.adminUsers(action, { user_id: u.id });
+      if (action === "reset") showCredentials([{ ...res, name: who }], [], "New starting password");
+      else toast(action === "disable" ? `Access turned off for ${who}` : `Access restored for ${who}`, { type: "success" });
+      load();
+    } catch (e) { toast("Couldn't do that", { type: "danger", detail: e.message }); }
+  }
+
+  function draw() {
+    const rows = users.filter((u) => !filter ||
+      [u.full_name, u.email, u.home_location].some((v) => String(v ?? "").toLowerCase().includes(filter)));
+    countEl.textContent = `${users.filter((u) => !u.disabled).length} active · ${users.length} total`;
+    if (!rows.length) return listBody.replaceChildren(h("div", { class: "empty" }, users.length ? "No one matches that search." : "No employees yet. Add some above."));
+    listBody.replaceChildren(h("table", { class: "tickets-table people-table" },
+      h("thead", {}, h("tr", {}, ["Name", "Home location", "Status", "Last sign-in", ""].map((c) => h("th", {}, c)))),
+      h("tbody", {}, rows.map((u) => {
+        const me = u.id === state.profile.id;
+        return h("tr", { class: u.disabled ? "row-off" : "" },
+          h("td", { class: "cell-title" }, h("div", {}, u.full_name || "—", me && h("span", { class: "muted small" }, " (you)")),
+            h("div", { class: "muted small mono" }, u.email)),
+          h("td", {}, u.home_location || h("span", { class: "muted" }, "—")),
+          h("td", {}, statusBadgeFor(u)),
+          h("td", { class: "muted" }, u.last_sign_in_at ? timeAgo(u.last_sign_in_at) : "Never"),
+          h("td", { class: "row-actions" }, !me && [
+            h("button", { type: "button", class: "btn btn-sm", onclick: () => act(u, "reset") }, "Reset password"),
+            u.disabled
+              ? h("button", { type: "button", class: "btn btn-sm", onclick: () => act(u, "enable") }, "Turn on")
+              : h("button", { type: "button", class: "btn btn-sm btn-danger-outline", onclick: () => act(u, "disable") }, "Turn off"),
+          ]));
+      }))));
+  }
+
+  async function load() {
+    try {
+      const data = await api.adminUsers("list");
+      if (nav !== state.navSeq) return;
+      users = data.users; draw();
+    } catch (e) { listBody.replaceChildren(h("div", { class: "form-error card-pad" }, e.message)); }
+  }
+
+  shell("employees",
+    h("div", { class: "page-head no-print" }, h("h1", {}, "Employees")),
+    h("section", { class: "card no-print" },
+      h("h2", {}, "Add employees"),
+      h("p", { class: "muted small" }, `Paste @${DOMAIN} email addresses, one per line. Add a name before the email if you'd like (otherwise it's guessed from the email, and they can fix it).`),
+      textarea, addErr, h("div", { class: "actions" }, addBtn)),
+    resultsArea,
+    h("div", { class: "filters no-print" },
+      h("input", { class: "input input-sm search", type: "search", placeholder: "Search name, email, location…",
+        oninput: (e) => { filter = e.target.value.toLowerCase(); draw(); } }),
+      countEl),
+    h("div", { class: "card flush no-print" }, listBody));
+  load();
 }
 
 // ---------------------------------------------------------------------
