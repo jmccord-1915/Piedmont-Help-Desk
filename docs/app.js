@@ -59,7 +59,7 @@ async function createSupabaseApi() {
     },
     // Admin-only actions run in the "admin-users" Edge Function (it holds the key that can create accounts).
     adminUsers: async (action, payload = {}) => {
-      const { data, error } = await sb.functions.invoke("admin-users", { body: { action, ...payload } });
+      const { data, error } = await sb.functions.invoke(CONFIG.ADMIN_FUNCTION || "admin-users", { body: { action, ...payload } });
       if (error) {
         let msg = error.message;
         const status = error.context?.status;

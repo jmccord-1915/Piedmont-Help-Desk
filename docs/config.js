@@ -8,4 +8,6 @@ export const CONFIG = {
   SUPABASE_URL: "https://kleyukqaacslivfqozbs.supabase.co",
   SUPABASE_ANON_KEY: "sb_publishable_ewAfFiDg0mcnyfDf13cw2Q_7WnS8Flo",
   COMPANY_DOMAIN: "1915south.com",
+  // The web-address name of the Employees function in Supabase (Edge Functions → its URL ends in /functions/v1/<this>)
+  ADMIN_FUNCTION: "super-function",
 };
