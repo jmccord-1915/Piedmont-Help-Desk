@@ -4,7 +4,7 @@
 // The anon/publishable key is safe to put here — security is enforced by
 // the database rules in 01_schema.sql.
 export const CONFIG = {
-  SUPABASE_URL: "https://YOUR-PROJECT-REF.supabase.co",
-  SUPABASE_ANON_KEY: "YOUR-ANON-OR-PUBLISHABLE-KEY",
+  SUPABASE_URL: "https://kleyukqaacslivfqozbs.supabase.co",
+  SUPABASE_ANON_KEY: "sb_publishable_ewAfFiDg0mcnyfDf13cw2Q_7WnS8Flo",
   COMPANY_DOMAIN: "1915south.com",
 };
